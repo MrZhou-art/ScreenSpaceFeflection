@@ -10,8 +10,10 @@ namespace ScreenSpaceReflection.Render
         public static readonly string SsrTexName = "_SsrTex";
         
         public static readonly int SsrTexID = Shader.PropertyToID(SsrTexName);
-        // x: step count, y: thickness, z: step size(Stride)
-        public static readonly int SsrParametersID = Shader.PropertyToID("_SsrParameters");
+        // x: step count, y: thickness, z: step size(Stride) , w: ray Z offset
+        public static readonly int SsrParameters1ID = Shader.PropertyToID("_SsrParameters1");
+        // x: max distance, y: , z: , w:
+        public static readonly int SsrParameters2ID = Shader.PropertyToID("_SsrParameters2");
     }
     
     public class SsrRenderPass : ScriptableRenderPass
@@ -30,8 +32,6 @@ namespace ScreenSpaceReflection.Render
         public void Create(Material ssrMaterial)
         {
             m_SsrMaterial = ssrMaterial;
-            
-            m_SsrRT = RTHandles.Alloc(SsrShaderConstants.SsrTexID, name: SsrShaderConstants.SsrTexName);
         }
 
         public void Setup(SsrRenderFeature.SsrSettings settings)
@@ -47,9 +47,20 @@ namespace ScreenSpaceReflection.Render
             m_Descriptor = renderingData.cameraData.cameraTargetDescriptor;
             m_Descriptor.useMipMap = false;
             m_Descriptor.autoGenerateMips = false;
+            
+            var tempDesc = GetCompatibleDescriptor(m_Descriptor.width, m_Descriptor.height,
+                GraphicsFormat.B10G11R11_UFloatPack32);
+            
+            string rtName = SsrShaderConstants.SsrTexName;
+            RenderingUtils.ReAllocateIfNeeded(ref m_SsrRT, tempDesc, FilterMode.Bilinear,
+                TextureWrapMode.Clamp,
+                name: rtName);
           
-            m_SsrMaterial.SetVector(SsrShaderConstants.SsrParametersID,
-                new Vector4(m_Settings.StepCount, m_Settings.Thickness / 100, m_Settings.Stride / 100000, m_Settings.RayOffset));
+            m_SsrMaterial.SetVector(SsrShaderConstants.SsrParameters1ID,
+                new Vector4(m_Settings.StepCount, m_Settings.Thickness / 100, 
+                    m_Settings.Stride / 100, m_Settings.RayOffset));
+            m_SsrMaterial.SetVector(SsrShaderConstants.SsrParameters2ID,
+                new Vector4(m_Settings.MaxDistance, 0, 0, 0));
         }
 
         public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
@@ -83,6 +94,7 @@ namespace ScreenSpaceReflection.Render
         public void Dispose()
         {
             m_SsrRT?.Release();
+            m_SsrRT = null;
         }
         
         public void ClearUp()

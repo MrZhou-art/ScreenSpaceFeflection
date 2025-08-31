@@ -32,12 +32,18 @@ Shader "Hidden/SsrShader"
             SAMPLER(sampler_BlitTexture);
 
             // x: step count, y: thickness, z: step size w: ray offset
-            float4 _SsrParameters;
+            float4 _SsrParameters1;
+            // x: max distance
+            float4 _SsrParameters2;
 
-            #define RAY_OFFSET _SsrParameters.w
-            #define STEP_COUNT _SsrParameters.x
-            #define THICKNESS _SsrParameters.y
-            #define STEP_SIZE _SsrParameters.z
+            // _SsrParameters1
+            #define STEP_COUNT _SsrParameters1.x
+            #define THICKNESS _SsrParameters1.y
+            #define STRIDE _SsrParameters1.z
+            #define RAY_OFFSET _SsrParameters1.w
+
+            // _SsrParameters2
+            #define MAX_DISTANCE _SsrParameters2.x
 
             // ------------ Shader Stage ----------
             half4 SsrFrag(Varyings input) : SV_Target
@@ -46,10 +52,7 @@ Shader "Hidden/SsrShader"
                 float2 uv = input.texcoord;
                 
                 half4 source = GetSource(uv);
-                // rawDepth 记录 NDC 空间的 Z 信息 [0, 1]
                 float rawDepth = SampleSceneDepth(uv);
-                // linearDepth 为视线空间的 Z 坐标绝对值
-                // float linear01Depth = Linear01Depth(rawDepth, _ZBufferParams);
                 float3 normalWS = 0;
                 float smoothness = 0;
                 GetNormalAndSmoothness(uv, normalWS, smoothness);
@@ -57,52 +60,17 @@ Shader "Hidden/SsrShader"
 
                 float3 posWS = GetWorldSpacePosition(uv, rawDepth);
                 float3 viewDirWS = normalize(_WorldSpaceCameraPos - posWS);
-                float3 viewDirVS = TransformWorldToViewDir(viewDirWS);
 
                 float3 reflDirWS = normalize(-reflect(viewDirWS, normalWS));
                 float3 reflDirVS = TransformWorldToViewDir(reflDirWS);
                 
                 float3 posVS = TransformWorldToView(posWS);
 
-                // 存在自反射, 需要加一定的偏移
-                float3 rayVS = posVS + normalVS * RAY_OFFSET;
-
-                // ------ Shading ----------
-
-                // for debug
-                // return half4(reflDirVS, 1);
-
-                // 视图空间 RayMarching
-                UNITY_LOOP
-                for (int i = 0; i < STEP_COUNT; i++)
-                {
-                    rayVS += reflDirVS * STEP_SIZE * i;
-                    float2 currRayUV;
-                    ReconstructUV(rayVS, currRayUV);
-                    
-                    if (any(currRayUV < 0.0) || any(currRayUV > 1.0))
-                            // for debug
-                            return half4(0.0, 0.0, 0.0, 1.0);
-                            // return GetSource(uv);
-                    
-                    float currSampleDepth = SampleSceneDepth(currRayUV).x;
-                    // 重构出相机空间的 Z 坐标(绝对值)进行比较, 方便调参
-                    float currSampleZ = LinearEyeDepth(currSampleDepth, _ZBufferParams);
-                    float currRayZ = -rayVS.z;
-
-                    float deltaZ = currRayZ - currSampleZ;
-                    
-                    if (deltaZ >= 0 && deltaZ < THICKNESS)
-                    {
-                        return GetSource(currRayUV);
-                        return GetSource(currRayUV) * smoothness + GetSource(uv);
-                    }
-                }
+                // --------- Shading ------------
+                float3 finalColor = ScreenSpaceRayMarching(uv, posVS, reflDirVS, normalVS, smoothness,
+                    STEP_COUNT, THICKNESS, STRIDE, RAY_OFFSET, MAX_DISTANCE);
                 
-                // 未击中的区域为黑色
-                return half4(0.0, 0.0, 0.0, 1.0);
-                return GetSource(uv);
-                
+                return half4(finalColor, 1);
             }
             ENDHLSL
         }

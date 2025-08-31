@@ -15,6 +15,7 @@ namespace ScreenSpaceReflection.Render
             [SerializeField] internal float Thickness = 0.3f;
             [SerializeField] internal float Stride = 0.1f;
             [SerializeField] internal float RayOffset = 0.1f;
+            [SerializeField] internal float MaxDistance = 10;
         }
     
         [SerializeField] private Shader m_SsrShader;
