@@ -1,3 +1,6 @@
+// Custom Struction
+#include "SsrCustomStruct.hlsl"
+
 // 获取 Blit Texture 
 half4 GetSource(float2 uv)
 {
@@ -88,7 +91,7 @@ float3 ViewSpaceRayMarching(float2 uv, float3 reflDirVS, float3 rayVS, float smo
 
 // 屏幕空间 RayMarching
 float3 ScreenSpaceRayMarching(float2 uv, float3 posVS, float3 reflDirVS, float3 normalVS, float smoothness,
-                              float stepCount, float thickness, float stride, float rayOffset, float maxDistance)
+                              float stepCount, float thickness, float stride, float rayOffset, float maxDistance, float attenuation)
 {
     // 视图空间中射线起始位置和结束位置
     float3 startVS = posVS;
@@ -169,10 +172,243 @@ float3 ScreenSpaceRayMarching(float2 uv, float3 posVS, float3 reflDirVS, float3 
         bool intersecting = (rayFarZ <= surfaceZ) && (rayNearZ >= surfaceZ - thickness);
 
         if (intersecting)
-            // return GetSource(hitUV);
-            return GetSource(hitUV) * smoothness + GetSource(uv);
+        {
+            float2 attUV = abs(hitUV - 0.5) * 1.8;
+            attUV = pow(saturate(attUV), attenuation);
+            float att = length(attUV);
+            float edgeFading = pow(saturate(1 - att * att), 5); 
+                
+            return GetSource(hitUV);
+            return GetSource(hitUV) * smoothness * edgeFading + GetSource(uv);
+        }
     }
 
-    // return half4(0, 0, 0, 1);
+    return half4(0, 0, 0, 1);
     return GetSource(uv);
+}
+
+
+// 屏幕空间 RayMarching 判断
+bool ScreenSpaceRayMarching(inout float2 currPosSS, inout float currInvW, float2 dPosSS, float dInvW,
+                            float rayZ, bool isVertical, out float deltaZ, inout float2 hitUV, float2 endSS, float dir, float stepCount)
+{
+    // 同时考虑方向和大小, 用 end 判断步进结束
+    float end = endSS.x * dir;
+    float preZ = rayZ;
+
+    // 进行屏幕空间射线步近
+    UNITY_LOOP
+    for (int i = 0; i < stepCount && currPosSS.x * dir <= end; i++)
+    {
+        // 步近
+        currPosSS += dPosSS;
+        currInvW += dInvW;
+
+        // 得到步近前后两点的深度
+        float rayNearZ = preZ;
+        float rayFarZ = -1 / (dInvW * 0.5 + currInvW);
+        preZ = rayFarZ;
+        // 视图空间中相机朝向 -Z 方向
+        if (rayNearZ < rayFarZ) Swap(rayNearZ, rayFarZ);
+
+        // 得到交点uv
+        hitUV = isVertical ? currPosSS.yx : currPosSS;// 复原
+        hitUV *= _ScreenSize.zw;
+
+        if (any(hitUV < 0.0) || any(hitUV > 1.0)) return false;
+
+        float surfaceZ = -LinearEyeDepth(SampleSceneDepth(hitUV), _ZBufferParams);
+        deltaZ = abs(surfaceZ - rayNearZ);
+
+        if (rayFarZ <= surfaceZ) return true;
+    }
+    return false;
+}
+
+// 二分搜索
+bool BinarySearchRayMarching(float3 posVS, float3 reflDirVS, float3 normalVS, inout float2 hitUV,
+    float stepCount, float thickness, float stride, float rayOffset, float maxDistance, float binaryCount)
+{
+    // 视图空间中射线起始位置和结束位置
+    float3 startVS = posVS;
+    
+    float endVSZ = posVS.z + reflDirVS.z * maxDistance;
+    if (endVSZ > -_ProjectionParams.y)
+        maxDistance = (-_ProjectionParams.y - startVS.z) / reflDirVS.z;
+    float3 endVS = startVS + reflDirVS * maxDistance;
+
+    // inverse w
+    // w = -Vz , 为了后面方便在屏幕空间插值深度
+    float startInvW = 0;
+    float endInvW = 0;
+
+    // 屏幕空间中射线起始位置和结束位置  
+    // 其实 startSS = uv * _ScreenSize.xy ([0, 1]^2 -> [0, w-1],[0, h-1])
+    // 但是为了拿到裁剪空间的 w 分量, 我们必须使用自定义的 TransformViewToScreen 函数
+    float2 startSS = TransformViewToScreen(startVS, _ScreenSize.xy, startInvW);
+    float2 endSS = TransformViewToScreen(endVS, _ScreenSize.xy, endInvW);
+
+    // DDA 算法
+    float2 deltaSS = endSS - startSS; // 注意方向性!
+    bool isVertical = false;
+    // 我们默认的是以横轴为主导向, 如果纵轴为主导向, 则进行反转, 并在之后进行复原
+    if (abs(deltaSS.x) < abs(deltaSS.y))
+    {
+        isVertical = true;
+
+        deltaSS = deltaSS.yx;
+        startSS = startSS.yx;
+        endSS = endSS.yx;
+    }
+
+    // 计算屏幕坐标、inverse-w的线性增量
+    float dir = sign(deltaSS.x); // 屏幕空间增量方向
+    float invdx = dir / deltaSS.x; // 1 / 屏幕空间增量 (绝对值)
+    float2 dPosSS = float2(dir, invdx * deltaSS.y);
+    float dInvW = (endInvW - startInvW) * invdx;
+
+    // 步长的调整
+    dPosSS *= stride;
+    dInvW *= stride;
+
+    // 存在自反射, 需要加一定的偏移
+    float3 rayVS = posVS + normalVS * rayOffset;
+
+    // 起始数据
+    float2 currPosSS = startSS;
+    float currInvW = startInvW;
+
+    float deltaZ = 0;
+    float rayZ = rayVS.z;
+    
+    UNITY_LOOP
+    for (int i = 0; i < binaryCount; i++)
+    {
+        // 添加抖动, 以实现大幅度减少真正步进的次数
+        // float2 ditherUV = fmod(currPosSS, 4);
+        // float jitter = dither[ditherUV.x * 4 + ditherUV.y];
+
+        // currPosSS += dPosSS * jitter;
+        // currInvW += dInvW * jitter;
+        currPosSS += dPosSS;
+        currInvW += dInvW;
+
+        if (ScreenSpaceRayMarching(currPosSS, currInvW, dPosSS, dInvW, rayZ, isVertical, deltaZ, hitUV, endSS, dir, stepCount))
+        {
+            if (deltaZ < thickness)
+                return true;
+            currPosSS -= dPosSS;
+            currInvW -= dInvW;
+            rayZ = -1 / currInvW;
+
+            dPosSS *= 0.5;
+            dInvW *= 0.5;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    return false;
+}
+
+// 二分搜索
+bool BinarySearchRayMarching(in BinarySearchRayMarchingData BSRMData, inout float2 hitUV)
+{
+    float3 posVS = BSRMData.posVS;
+    float3 reflDirVS = BSRMData.reflDirVS;
+    float3 normalVS = BSRMData.normalVS;
+                                  
+    float stepCount = BSRMData.stepCount;
+    float thickness = BSRMData.thickness;
+    float stride = BSRMData.stride;
+    float rayOffset = BSRMData.rayOffset;
+    float maxDistance = BSRMData.maxDistance;
+    float binaryCount = BSRMData.binaryCount;
+    
+    // 视图空间中射线起始位置和结束位置
+    float3 startVS = posVS;
+    float3 endVS = posVS + reflDirVS * maxDistance;
+    
+    if (endVS.z > -_ProjectionParams.y)
+        maxDistance = (-_ProjectionParams.y - startVS.z) / reflDirVS.z;
+    endVS = startVS + reflDirVS * maxDistance;
+
+    // inverse w
+    // w = -Vz , 为了后面方便在屏幕空间插值深度
+    float startInvW = 0;
+    float endInvW = 0;
+
+    // 屏幕空间中射线起始位置和结束位置  
+    // 其实 startSS = uv * _ScreenSize.xy ([0, 1]^2 -> [0, w-1],[0, h-1])
+    // 但是为了拿到裁剪空间的 w 分量, 我们必须使用自定义的 TransformViewToScreen 函数
+    float2 startSS = TransformViewToScreen(startVS, _ScreenSize.xy, startInvW);
+    float2 endSS = TransformViewToScreen(endVS, _ScreenSize.xy, endInvW);
+
+    // DDA 算法
+    float2 deltaSS = endSS - startSS; // 注意方向性!
+    bool isVertical = false;
+    // 我们默认的是以横轴为主导向, 如果纵轴为主导向, 则进行反转, 并在之后进行复原
+    if (abs(deltaSS.x) < abs(deltaSS.y))
+    {
+        isVertical = true;
+
+        deltaSS = deltaSS.yx;
+        startSS = startSS.yx;
+        endSS = endSS.yx;
+    }
+
+    // 计算屏幕坐标、inverse-w的线性增量
+    float dir = sign(deltaSS.x); // 屏幕空间增量方向
+    float invdx = dir / deltaSS.x; // 1 / 屏幕空间增量 (绝对值)
+    float2 dPosSS = float2(dir, invdx * deltaSS.y);
+    float dInvW = (endInvW - startInvW) * invdx;
+
+    // 步长的调整
+    dPosSS *= stride;
+    dInvW *= stride;
+
+    // 存在自反射, 需要加一定的偏移
+    float3 rayVS = posVS + normalVS * rayOffset;
+
+    // 起始数据
+    float2 currPosSS = startSS;
+    float currInvW = startInvW;
+
+    float rayZ = rayVS.z;
+    float deltaZ = 0;
+
+    // for Debug
+
+    UNITY_LOOP
+    for (int i = 0; i < binaryCount; i++)
+    {
+        // 添加抖动, 以实现大幅度减少真正步进的次数
+        // float2 ditherUV = fmod(currPosSS, 4);
+        // float jitter = dither[ditherUV.x * 4 + ditherUV.y];
+
+        // currPosSS += dPosSS * jitter;
+        // currInvW += dInvW * jitter;
+
+        currPosSS += dPosSS;
+        currInvW += dInvW;
+        
+        if (ScreenSpaceRayMarching(currPosSS, currInvW, dPosSS, dInvW, rayZ, isVertical, deltaZ, hitUV, endSS, dir, stepCount))
+        {
+            if (deltaZ < thickness) return true;
+            
+            currPosSS -= dPosSS;
+            currInvW -= dInvW;
+            rayZ = -1 / currInvW;
+
+            dPosSS *= 0.5;
+            dInvW *= 0.5;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    
+    return false;
 }

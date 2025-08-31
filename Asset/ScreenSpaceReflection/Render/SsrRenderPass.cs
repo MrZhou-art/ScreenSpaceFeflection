@@ -1,3 +1,4 @@
+using UnityEditor.Rendering;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -8,11 +9,13 @@ namespace ScreenSpaceReflection.Render
     static class SsrShaderConstants
     {
         public static readonly string SsrTexName = "_SsrTex";
+        public static readonly string  IsBinarySearchName = "_BINARY_SEARCH_RAY_MARCHING";
+        public static readonly string  IsScreenSpaceRayMarchingName = "_SCREEN_SPACE_RAY_MARCHING";
         
         public static readonly int SsrTexID = Shader.PropertyToID(SsrTexName);
         // x: step count, y: thickness, z: step size(Stride) , w: ray Z offset
         public static readonly int SsrParameters1ID = Shader.PropertyToID("_SsrParameters1");
-        // x: max distance, y: , z: , w:
+        // x: max distance, y: attenuation, z: binary count
         public static readonly int SsrParameters2ID = Shader.PropertyToID("_SsrParameters2");
     }
     
@@ -60,7 +63,11 @@ namespace ScreenSpaceReflection.Render
                 new Vector4(m_Settings.StepCount, m_Settings.Thickness / 100, 
                     m_Settings.Stride / 100, m_Settings.RayOffset));
             m_SsrMaterial.SetVector(SsrShaderConstants.SsrParameters2ID,
-                new Vector4(m_Settings.MaxDistance, 0, 0, 0));
+                new Vector4(m_Settings.MaxDistance, m_Settings.Attenuation, 
+                    m_Settings.BinaryCount, 0));
+            
+            CoreUtils.SetKeyword(m_SsrMaterial,SsrShaderConstants.IsBinarySearchName , m_Settings.IsBinarySearch);
+            CoreUtils.SetKeyword(m_SsrMaterial,SsrShaderConstants.IsScreenSpaceRayMarchingName , !m_Settings.IsBinarySearch);
         }
 
         public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)

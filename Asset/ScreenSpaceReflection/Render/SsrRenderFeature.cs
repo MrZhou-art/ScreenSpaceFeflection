@@ -16,6 +16,10 @@ namespace ScreenSpaceReflection.Render
             [SerializeField] internal float Stride = 0.1f;
             [SerializeField] internal float RayOffset = 0.1f;
             [SerializeField] internal float MaxDistance = 10;
+            [SerializeField] internal float Attenuation = 3;
+
+            [SerializeField] internal bool IsBinarySearch = false;
+            [SerializeField] internal int BinaryCount = 10;
         }
     
         [SerializeField] private Shader m_SsrShader;
