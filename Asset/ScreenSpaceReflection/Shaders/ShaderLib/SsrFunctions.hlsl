@@ -1,5 +1,6 @@
-// Custom Struction
-#include "SsrCustomStruct.hlsl"
+#include "SsrCustomStruct.hlsl" // Custom Struction
+#include "SsrGlobalData.hlsl" // Global Variable
+
 
 // 获取 Blit Texture 
 half4 GetSource(float2 uv)
@@ -59,9 +60,11 @@ void ReconstructUV(float3 posVS, out float2 uv)
 // ---------- Ray Marching ------------
 
 // 视图空间 RayMarching
-float3 ViewSpaceRayMarching(float2 uv, float3 reflDirVS, float3 rayVS, float smoothness,
-                            float thickness, float stride, float stepCount)
+float3 ViewSpaceRayMarching(float2 uv, float3 reflDirVS, float3 normalVS,float3 posVS, float smoothness,
+                            float thickness, float stride, float stepCount, float rayOffset)
 {
+    float3 rayVS = posVS + normalVS * rayOffset;
+    
     // 视图空间 RayMarching
     UNITY_LOOP
     for (int i = 0; i < stepCount; i ++)
@@ -177,16 +180,17 @@ float3 ScreenSpaceRayMarching(float2 uv, float3 posVS, float3 reflDirVS, float3 
             attUV = pow(saturate(attUV), attenuation);
             float att = length(attUV);
             float edgeFading = pow(saturate(1 - att * att), 5); 
-                
-            return GetSource(hitUV);
+
+            // for debug
+            // return GetSource(hitUV);
             return GetSource(hitUV) * smoothness * edgeFading + GetSource(uv);
         }
     }
 
-    return half4(0, 0, 0, 1);
+    // for debug
+    // return half4(0, 0, 0, 1);
     return GetSource(uv);
 }
-
 
 // 屏幕空间 RayMarching 判断
 bool ScreenSpaceRayMarching(inout float2 currPosSS, inout float currInvW, float2 dPosSS, float dInvW,
@@ -312,7 +316,7 @@ bool BinarySearchRayMarching(float3 posVS, float3 reflDirVS, float3 normalVS, in
     return false;
 }
 
-// 二分搜索
+// 二分搜索 (使用结构体包装函数参数)
 bool BinarySearchRayMarching(in BinarySearchRayMarchingData BSRMData, inout float2 hitUV)
 {
     float3 posVS = BSRMData.posVS;
@@ -410,5 +414,218 @@ bool BinarySearchRayMarching(in BinarySearchRayMarchingData BSRMData, inout floa
         }
     }
     
+    return false;
+}
+
+// HiZ RayMarching
+float4 _HiZRayMarching(float3 posVS, float3 reflDirVS, float3 normalVS, float2 hitUV,
+    float stepCount, float thickness, float stride, float rayOffset, float maxDistance)
+{
+    // 视图空间中射线起始位置和结束位置
+    float3 startVS = posVS;
+    
+    float endVSZ = posVS.z + reflDirVS.z * maxDistance;
+    if (endVSZ > -_ProjectionParams.y)
+        maxDistance = (-_ProjectionParams.y - startVS.z) / reflDirVS.z;
+    float3 endVS = startVS + reflDirVS * maxDistance;
+
+    // inverse w
+    float startInvW = 0;
+    float endInvW = 0;
+
+    // 屏幕空间中射线起始位置和结束位置  
+    float2 startSS = TransformViewToScreen(startVS, _ScreenSize.xy, startInvW);
+    float2 endSS = TransformViewToScreen(endVS, _ScreenSize.xy, endInvW);
+
+    // DDA 算法
+    float2 deltaSS = endSS - startSS; // 注意方向性!
+    bool isVertical = false;
+    // 我们默认的是以横轴为主导向, 如果纵轴为主导向, 则进行反转, 并在之后进行复原
+    if (abs(deltaSS.x) < abs(deltaSS.y))
+    {
+        isVertical = true;
+
+        deltaSS = deltaSS.yx;
+        startSS = startSS.yx;
+        endSS = endSS.yx;
+    }
+
+    // 计算屏幕坐标、inverse-w的线性增量
+    float dir = sign(deltaSS.x); // 屏幕空间增量方向
+    float invdx = dir / deltaSS.x; // 1 / 屏幕空间增量 (绝对值)
+    float2 dPosSS = float2(dir, invdx * deltaSS.y);
+    float dInvW = (endInvW - startInvW) * invdx;
+
+    // 步长的调整
+    dPosSS *= stride;
+    dInvW *= stride;
+
+    // 存在自反射, 需要加一定的偏移
+    float3 rayVS = posVS + normalVS * rayOffset;
+
+    // 起始数据
+    float2 currPosSS = startSS;
+    float currInvW = startInvW;
+
+    float preZ = rayVS.z;// 作为初始 Z 分量和缓存的作用
+    float rayNearZ = 0;
+    float rayFarZ = 0;
+
+    float mipLevel = 0.0;
+    float end = endSS.x * dir;
+
+    // 进行屏幕空间射线步近
+    UNITY_LOOP
+    for (int i = 0; i < stepCount && currPosSS.x * dir <= end; i++)
+    {
+        // 步近
+        currPosSS += dPosSS * exp2(mipLevel);
+        currInvW += dInvW * exp2(mipLevel);
+
+        // 得到步近前后两点的深度
+        rayNearZ = preZ;
+        rayFarZ = -1 / (dInvW * exp2(mipLevel) * 0.5 + currInvW);
+        preZ = rayFarZ;
+        if (rayNearZ < rayFarZ) Swap(rayNearZ, rayFarZ);
+
+        // 得到交点uv
+        hitUV = isVertical ? currPosSS.yx : currPosSS;
+        hitUV *= _ScreenSize.zw;
+
+        // TODO: return false
+        if (any(hitUV < 0.0) || any(hitUV > 1.0)) return float4(hitUV, 0.0, 0.0); // 最后一个分量 0 表示未命中
+
+        float mipDepth = SAMPLE_TEXTURE2D_X_LOD(_HiZTex, sampler_HiZTex, hitUV, mipLevel);
+        float surfaceZ = -LinearEyeDepth(mipDepth, _ZBufferParams);
+
+        if (!(rayFarZ <= surfaceZ))
+        {
+            mipLevel = min(mipLevel + 1, _MaxHiZMipLevel);
+        }
+        else
+        {
+            if (mipLevel == 0)
+            {
+                if (abs(surfaceZ - rayNearZ) < thickness)
+                {
+                    // TODO: return true , inout deltaZ
+                    // for debug
+                    return float4(hitUV, abs(surfaceZ - rayFarZ), 1.0);
+
+                    return float4(hitUV, rayFarZ, 1.0);
+                }
+                // return float4(hitUV, rayZMin, 0.0);
+            }
+            else
+            {
+                currPosSS -= dPosSS * exp2(mipLevel);
+                currInvW -= dInvW * exp2(mipLevel);
+                preZ = -1 / currInvW;
+
+                mipLevel--;
+            }
+        }
+    }
+    return float4(hitUV, rayFarZ, 0.0);
+}
+
+// HiZ RayMarching
+bool HiZRayMarching(float3 posVS, float3 reflDirVS, float3 normalVS, inout float2 hitUV,
+    float stepCount, float thickness, float stride, float rayOffset, float maxDistance)
+{
+    // 视图空间中射线起始位置和结束位置
+    float3 startVS = posVS;
+    
+    float endVSZ = posVS.z + reflDirVS.z * maxDistance;
+    if (endVSZ > -_ProjectionParams.y)
+        maxDistance = (-_ProjectionParams.y - startVS.z) / reflDirVS.z;
+    float3 endVS = startVS + reflDirVS * maxDistance;
+
+    // inverse w
+    float startInvW = 0;
+    float endInvW = 0;
+
+    // 屏幕空间中射线起始位置和结束位置  
+    float2 startSS = TransformViewToScreen(startVS, _ScreenSize.xy, startInvW);
+    float2 endSS = TransformViewToScreen(endVS, _ScreenSize.xy, endInvW);
+
+    // DDA 算法
+    float2 deltaSS = endSS - startSS; // 注意方向性!
+    bool isVertical = false;
+    // 我们默认的是以横轴为主导向, 如果纵轴为主导向, 则进行反转, 并在之后进行复原
+    if (abs(deltaSS.x) < abs(deltaSS.y))
+    {
+        isVertical = true;
+
+        deltaSS = deltaSS.yx;
+        startSS = startSS.yx;
+        endSS = endSS.yx;
+    }
+
+    // 计算屏幕坐标、inverse-w的线性增量
+    float dir = sign(deltaSS.x); // 屏幕空间增量方向
+    float invdx = dir / deltaSS.x; // 1 / 屏幕空间增量 (绝对值)
+    float2 dPosSS = float2(dir, invdx * deltaSS.y);
+    float dInvW = (endInvW - startInvW) * invdx;
+
+    // 步长的调整
+    dPosSS *= stride;
+    dInvW *= stride;
+
+    // 存在自反射, 需要加一定的偏移
+    float3 rayVS = posVS + normalVS * rayOffset;
+
+    // 起始数据
+    float2 currPosSS = startSS;
+    float currInvW = startInvW;
+
+    float preZ = rayVS.z;// 作为初始 Z 分量和缓存的作用
+
+    float mipLevel = 0.0;
+    float end = endSS.x * dir;
+
+    // 进行屏幕空间射线步近
+    UNITY_LOOP
+    for (int i = 0; i < stepCount && currPosSS.x * dir <= end; i++)
+    {
+        // 步近
+        currPosSS += dPosSS * exp2(mipLevel);
+        currInvW += dInvW * exp2(mipLevel);
+
+        // 得到步近前后两点的深度
+        float rayNearZ = preZ;
+        float rayFarZ = -1 / (dInvW * exp2(mipLevel) * 0.5 + currInvW);
+        preZ = rayFarZ;
+        if (rayNearZ < rayFarZ) Swap(rayNearZ, rayFarZ);
+
+        // 得到交点uv
+        hitUV = isVertical ? currPosSS.yx : currPosSS;
+        hitUV *= _ScreenSize.zw;
+
+        if (any(hitUV < 0.0) || any(hitUV > 1.0)) return false;
+
+        float mipDepth = SAMPLE_TEXTURE2D_X_LOD(_HiZTex, sampler_HiZTex, hitUV, mipLevel);
+        float surfaceZ = -LinearEyeDepth(mipDepth, _ZBufferParams);
+
+        if (rayFarZ <= surfaceZ)
+        {
+            if (mipLevel == 0)
+            {
+                if (abs(surfaceZ - rayNearZ) < thickness) return true;
+            }
+            else
+            {
+                currPosSS -= dPosSS * exp2(mipLevel);
+                currInvW -= dInvW * exp2(mipLevel);
+                preZ = -1 / currInvW;
+
+                mipLevel--;
+            }
+        }
+        else
+        {
+            mipLevel = min(mipLevel + 1, _MaxHiZMipLevel);
+        }
+    }
     return false;
 }

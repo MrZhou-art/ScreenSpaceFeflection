@@ -6,22 +6,31 @@ using UnityEngine.Serialization;
 
 namespace ScreenSpaceReflection.Render
 {
+    public enum RayMarchingMode
+    {
+        ViewSpaceRayMarching,
+        ScreenSpaceRayMarching,
+        BinarySearchRayMarching,
+        HierarchicalZBufferRayMarching
+    }
+        
+    [Serializable]
+    public class SsrSettings
+    {
+        [SerializeField] internal RayMarchingMode RayMarchingMode = RayMarchingMode.ScreenSpaceRayMarching;
+            
+        [SerializeField] internal int StepCount = 200;
+        [SerializeField] internal float Thickness = 0.3f;
+        [SerializeField] internal float Stride = 0.1f;
+        [SerializeField] internal float RayOffset = 0.1f;
+        [SerializeField] internal float MaxDistance = 10;
+        [SerializeField] internal float Attenuation = 3;
+        
+        [SerializeField] internal int BinaryCount = 10;
+    }
+    
     public class SsrRenderFeature : ScriptableRendererFeature
     {
-        [Serializable]
-        public class SsrSettings
-        {
-            [SerializeField] internal int StepCount = 200;
-            [SerializeField] internal float Thickness = 0.3f;
-            [SerializeField] internal float Stride = 0.1f;
-            [SerializeField] internal float RayOffset = 0.1f;
-            [SerializeField] internal float MaxDistance = 10;
-            [SerializeField] internal float Attenuation = 3;
-
-            [SerializeField] internal bool IsBinarySearch = false;
-            [SerializeField] internal int BinaryCount = 10;
-        }
-    
         [SerializeField] private Shader m_SsrShader;
         [SerializeField] private RenderPassEvent m_RenderPassEvent = RenderPassEvent.AfterRenderingOpaques;
         [SerializeField] private SsrSettings m_Settings = new();

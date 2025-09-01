@@ -8,9 +8,12 @@ namespace ScreenSpaceReflection.Render
 {
     static class SsrShaderConstants
     {
-        public static readonly string SsrTexName = "_SsrTex";
-        public static readonly string  IsBinarySearchName = "_BINARY_SEARCH_RAY_MARCHING";
+        public static readonly string  IsViewSpaceRayMarchingName = "_VIEW_SPACE_RAY_MARCHING";
         public static readonly string  IsScreenSpaceRayMarchingName = "_SCREEN_SPACE_RAY_MARCHING";
+        public static readonly string  IsBinarySearchRayMarchingName = "_BINARY_SEARCH_RAY_MARCHING";
+        public static readonly string  IsHiZRayMarchingName = "_HIERARCHICAL_Z_BUFFER_RAY_MARCHING";
+        
+        public static readonly string SsrTexName = "_SsrTex";
         
         public static readonly int SsrTexID = Shader.PropertyToID(SsrTexName);
         // x: step count, y: thickness, z: step size(Stride) , w: ray Z offset
@@ -24,7 +27,7 @@ namespace ScreenSpaceReflection.Render
         private const string m_SsrProfilingTag = "SSRRenderPass";
         private ProfilingSampler m_ProfilingSampler = new(m_SsrProfilingTag + "_Sampler");
 
-        private SsrRenderFeature.SsrSettings m_Settings;
+        private SsrSettings m_Settings;
         
         private Material m_SsrMaterial;
         private RTHandle m_SourceRT;
@@ -34,10 +37,17 @@ namespace ScreenSpaceReflection.Render
 
         public void Create(Material ssrMaterial)
         {
+            if (!ssrMaterial)
+            {
+                Shader ssrShader = Shader.Find("Hidden/Universal Render Pipeline/Blit");
+                ssrMaterial = CoreUtils.CreateEngineMaterial(ssrShader);
+                Debug.Log("SSR Material is Null! Default SSR Material Has Been Enabled");
+            }
+
             m_SsrMaterial = ssrMaterial;
         }
 
-        public void Setup(SsrRenderFeature.SsrSettings settings)
+        public void Setup(SsrSettings settings)
         {
             m_Settings = settings;
         }
@@ -66,8 +76,15 @@ namespace ScreenSpaceReflection.Render
                 new Vector4(m_Settings.MaxDistance, m_Settings.Attenuation, 
                     m_Settings.BinaryCount, 0));
             
-            CoreUtils.SetKeyword(m_SsrMaterial,SsrShaderConstants.IsBinarySearchName , m_Settings.IsBinarySearch);
-            CoreUtils.SetKeyword(m_SsrMaterial,SsrShaderConstants.IsScreenSpaceRayMarchingName , !m_Settings.IsBinarySearch);
+            // 视图空间 Ray Marching : m_Settings.Stride / 10000 , 其他: m_Settings.Stride / 100
+            CoreUtils.SetKeyword(m_SsrMaterial,SsrShaderConstants.IsViewSpaceRayMarchingName,
+                RayMarchingMode.ViewSpaceRayMarching == m_Settings.RayMarchingMode);
+            CoreUtils.SetKeyword(m_SsrMaterial,SsrShaderConstants.IsScreenSpaceRayMarchingName,
+                RayMarchingMode.ScreenSpaceRayMarching == m_Settings.RayMarchingMode);
+            CoreUtils.SetKeyword(m_SsrMaterial,SsrShaderConstants.IsBinarySearchRayMarchingName,
+                RayMarchingMode.BinarySearchRayMarching == m_Settings.RayMarchingMode);
+            CoreUtils.SetKeyword(m_SsrMaterial,SsrShaderConstants.IsHiZRayMarchingName,
+                RayMarchingMode.HierarchicalZBufferRayMarching == m_Settings.RayMarchingMode);
         }
 
         public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
@@ -109,7 +126,6 @@ namespace ScreenSpaceReflection.Render
             CoreUtils.Destroy(m_SsrMaterial);
         }
 
-        
         RenderTextureDescriptor GetCompatibleDescriptor(int width, int height, GraphicsFormat format,
             DepthBits depthBufferBits = DepthBits.None)
             => GetCompatibleDescriptor(m_Descriptor, width, height, format, depthBufferBits);
